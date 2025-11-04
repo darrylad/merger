@@ -84,25 +84,23 @@ class CSVMerger:
     def merge_dataframes(self, dfs: List[pd.DataFrame], 
                         file_names: List[str]) -> pd.DataFrame:
         """
-        Merge multiple DataFrames horizontally (column-wise).
+        Merge multiple DataFrames vertically (row-wise) with continuous time.
         
-        The first DataFrame's time column is kept, subsequent DataFrames
-        have their X, Y, Z columns renamed to include the Ex number.
+        Each subsequent DataFrame has its time values offset by the last time
+        value from the accumulated data PLUS the sampling interval, making the 
+        time column continuous without overlapping timestamps.
         
         Args:
             dfs: List of DataFrames to merge
             file_names: List of original file names (for labeling)
             
         Returns:
-            Merged DataFrame
+            Merged DataFrame with continuous time
         """
         if not dfs:
             return pd.DataFrame()
         
-        # Start with the first DataFrame
-        result = dfs[0].copy()
-        
-        # Identify the columns we need
+        # Find the time column in the first DataFrame
         first_df = dfs[0]
         time_col = find_matching_column('channel', first_df.columns)
         
@@ -110,29 +108,65 @@ class CSVMerger:
             print("  ⚠️  Warning: No time/channel column found")
             return pd.DataFrame()
         
+        print(f"  🕒 Time column identified: '{time_col}'")
+        
+        # Start with the first DataFrame
+        result = dfs[0].copy()
+        
+        # Calculate sampling interval from the first DataFrame
+        # This is the difference between the last two time values
+        if len(result) >= 2:
+            sampling_interval = result[time_col].iloc[-1] - result[time_col].iloc[-2]
+        else:
+            # If only one row, use a default or the time value itself
+            sampling_interval = result[time_col].iloc[-1] if len(result) == 1 else 0
+        
+        print(f"  📊 Ex1: {len(result)} rows, time range: {result[time_col].iloc[0]:.6f} to {result[time_col].iloc[-1]:.6f}, sampling interval: {sampling_interval:.6f}")
+        
+        # Current offset starts at last time + sampling interval
+        current_time_offset = result[time_col].iloc[-1] + sampling_interval
+        
         # For each subsequent DataFrame
         for idx, (df, file_name) in enumerate(zip(dfs[1:], file_names[1:]), start=2):
-            # Extract Ex number for labeling
             ex_num = extract_ex_number(file_name)
-            suffix = f"_Ex{ex_num}" if ex_num else f"_{idx}"
+            ex_label = f"Ex{ex_num}" if ex_num else f"Ex{idx}"
             
-            # Find X, Y, Z columns (case-insensitive, contains match)
-            x_col = find_matching_column('x', df.columns)
-            y_col = find_matching_column('y', df.columns)
-            z_col = find_matching_column('z', df.columns)
+            # Create a copy to avoid modifying the original
+            df_copy = df.copy()
             
-            # Select and rename columns
-            columns_to_add = {}
-            if x_col:
-                columns_to_add[x_col] = f'X{suffix}'
-            if y_col:
-                columns_to_add[y_col] = f'Y{suffix}'
-            if z_col:
-                columns_to_add[z_col] = f'Z{suffix}'
+            # Find time column in this DataFrame (might have different case/spacing)
+            df_time_col = find_matching_column('channel', df_copy.columns)
             
-            # Add these columns to result
-            for orig_col, new_col in columns_to_add.items():
-                result[new_col] = df[orig_col]
+            if df_time_col is None:
+                print(f"  ⚠️  Warning: No time column in {file_name}, skipping...")
+                continue
+            
+            # Get the first timestamp in this DataFrame
+            first_time_in_df = df_copy[df_time_col].iloc[0]
+            
+            # Add offset to make time continuous
+            # The offset is: last_time_from_previous + sampling_interval
+            df_copy[df_time_col] = df_copy[df_time_col] - first_time_in_df + current_time_offset
+            
+            # Calculate sampling interval for this DataFrame
+            if len(df_copy) >= 2:
+                current_sampling_interval = df_copy[df_time_col].iloc[-1] - df_copy[df_time_col].iloc[-2]
+            else:
+                current_sampling_interval = sampling_interval  # Use previous interval as fallback
+            
+            print(f"  📊 {ex_label}: {len(df_copy)} rows, time range: {df_copy[df_time_col].iloc[0]:.6f} to {df_copy[df_time_col].iloc[-1]:.6f}, sampling interval: {current_sampling_interval:.6f}")
+            
+            # Update the offset for the next iteration
+            # Add the last time value + sampling interval
+            current_time_offset = df_copy[df_time_col].iloc[-1] + current_sampling_interval
+            
+            # Rename columns if they differ from the result DataFrame
+            # This ensures column names match for concatenation
+            if df_time_col != time_col:
+                df_copy.rename(columns={df_time_col: time_col}, inplace=True)
+            
+            # Append the DataFrame
+            result = pd.concat([result, df_copy], ignore_index=True)
         
         return result
     
@@ -189,7 +223,7 @@ class CSVMerger:
         
         # Merge all DataFrames
         if dataframes:
-            print(f"\n  🔄 Merging {len(dataframes)} file(s)...")
+            print(f"\n  🔄 Merging {len(dataframes)} file(s) vertically...")
             merged_df = self.merge_dataframes(dataframes, file_names)
             
             metadata['total_rows'] = len(merged_df)
@@ -260,12 +294,17 @@ class CSVMerger:
         for meta in all_metadata:
             print(f"\n📊 Class: {meta['class']}")
             print(f"   Files processed: {len(meta['files'])}")
-            print(f"   Total rows: {meta['total_rows']}")
+            print(f"   Total rows: {meta['total_rows']:,}")
             print(f"   Total columns: {meta['total_columns']}")
             
             if meta['files']:
-                print(f"   File details:")
+                print(f"   Individual file details:")
+                total_input_rows = 0
                 for file_info in meta['files']:
                     ex_label = f"Ex{file_info['ex_number']}" if file_info['ex_number'] else "Unknown"
                     print(f"     • {ex_label}: {file_info['name']} "
-                          f"({file_info['rows']} rows, {file_info['columns']} cols)")
+                          f"({file_info['rows']:,} rows, {file_info['columns']} cols)")
+                    total_input_rows += file_info['rows']
+                
+                print(f"   Input rows total: {total_input_rows:,}")
+                print(f"   Output rows: {meta['total_rows']:,}")
