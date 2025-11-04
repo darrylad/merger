@@ -7,6 +7,7 @@ import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from utils import natural_sort_files, find_matching_column, extract_ex_number
+from logger import Logger
 
 
 class CSVMerger:
@@ -35,6 +36,7 @@ class CSVMerger:
         
         # Store the project directory (where merger.py is located)
         self.project_dir = Path(__file__).parent
+        self.logger = None
     
     def get_class_folders(self) -> List[Path]:
         """
@@ -170,12 +172,13 @@ class CSVMerger:
         
         return result
     
-    def process_class(self, class_folder: Path) -> Dict:
+    def process_class(self, class_folder: Path, output_base_dir: Path) -> Dict:
         """
         Process all CSV files in a class folder.
         
         Args:
             class_folder: Path to the class folder
+            output_base_dir: Base output directory
             
         Returns:
             Dictionary containing metadata and merged DataFrame
@@ -189,17 +192,23 @@ class CSVMerger:
         
         if not csv_files:
             print(f"  ⚠️  No CSV files found in {class_name}")
-            return {'class': class_name, 'files': [], 'merged_df': pd.DataFrame()}
+            return {'class': class_name, 'files': [], 'merged_df': pd.DataFrame(), 'output_folder': None}
         
         print(f"Found {len(csv_files)} CSV file(s):")
         
         dataframes = []
         file_names = []
+        
+        # Create output folder for this class
+        class_output_folder = output_base_dir / class_name
+        class_output_folder.mkdir(parents=True, exist_ok=True)
+        
         metadata = {
             'class': class_name,
             'files': [],
             'total_rows': 0,
-            'total_columns': 0
+            'total_columns': 0,
+            'output_folder': class_output_folder
         }
         
         # Read each CSV file
@@ -253,32 +262,42 @@ class CSVMerger:
         
         output_dir.mkdir(exist_ok=True)
         
-        print(f"\n🚀 Starting CSV Merger")
-        print(f"Root Directory: {self.root_path}")
-        print(f"Output Directory: {output_dir}")
+        # Initialize logger
+        self.logger = Logger(output_dir)
+        log_file = self.logger.start()
         
-        class_folders = self.get_class_folders()
-        
-        if not class_folders:
-            print("\n⚠️  No class folders found!")
-            return
-        
-        print(f"\nFound {len(class_folders)} class(es): {[f.name for f in class_folders]}")
-        
-        # Process each class
-        all_metadata = []
-        for class_folder in sorted(class_folders):
-            metadata = self.process_class(class_folder)
-            all_metadata.append(metadata)
+        try:
+            print(f"\n🚀 Starting CSV Merger")
+            print(f"Root Directory: {self.root_path}")
+            print(f"Output Directory: {output_dir}")
             
-            # Save merged CSV
-            if not metadata['merged_df'].empty:
-                output_file = output_dir / f"{metadata['class']}_merged.csv"
-                metadata['merged_df'].to_csv(output_file, index=False)
-                print(f"  💾 Saved: {output_file}")
-        
-        # Print summary
-        self.print_summary(all_metadata)
+            class_folders = self.get_class_folders()
+            
+            if not class_folders:
+                print("\n⚠️  No class folders found!")
+                return
+            
+            print(f"\nFound {len(class_folders)} class(es): {[f.name for f in class_folders]}")
+            
+            # Process each class
+            all_metadata = []
+            for class_folder in sorted(class_folders):
+                metadata = self.process_class(class_folder, output_dir)
+                all_metadata.append(metadata)
+                
+                # Save merged CSV in the class-specific output folder
+                if not metadata['merged_df'].empty and metadata['output_folder']:
+                    output_file = metadata['output_folder'] / f"{metadata['class']}_merged.csv"
+                    metadata['merged_df'].to_csv(output_file, index=False)
+                    print(f"  💾 Saved: {output_file}")
+            
+            # Print summary
+            self.print_summary(all_metadata)
+            
+        finally:
+            # Always stop logging, even if there's an error
+            if self.logger:
+                self.logger.stop()
     
     def print_summary(self, all_metadata: List[Dict]) -> None:
         """
@@ -296,6 +315,8 @@ class CSVMerger:
             print(f"   Files processed: {len(meta['files'])}")
             print(f"   Total rows: {meta['total_rows']:,}")
             print(f"   Total columns: {meta['total_columns']}")
+            if meta['output_folder']:
+                print(f"   Output folder: {meta['output_folder']}")
             
             if meta['files']:
                 print(f"   Individual file details:")
